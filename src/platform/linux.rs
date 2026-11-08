@@ -959,6 +959,9 @@ fn try_start_server_(desktop: Option<&Desktop>) -> ResultType<Option<Child>> {
                 }
             }
 
+            if std::env::var("RUSTDESK_WAYLAND_LINEAR_CPU").as_deref() == Ok("1") {
+                envs.push(("RUSTDESK_WAYLAND_LINEAR_CPU", "1".to_owned()));
+            }
             append_audio_latency_envs(&mut envs, |key| std::env::var(key).ok());
 
             envs.push((
