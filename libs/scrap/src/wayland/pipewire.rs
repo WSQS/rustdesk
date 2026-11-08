@@ -33,6 +33,11 @@ use super::remote_desktop_portal::OrgFreedesktopPortalRemoteDesktop as remote_de
 use super::request_portal::OrgFreedesktopPortalRequestResponse;
 use super::screencast_portal::OrgFreedesktopPortalScreenCast as screencast_portal;
 
+#[path = "linear_cpu.rs"]
+mod linear_cpu;
+#[path = "linear_dmabuf.rs"]
+mod linear_dmabuf;
+
 lazy_static! {
     pub static ref RDP_SESSION_INFO: Mutex<Option<RdpSessionInfo>> = Mutex::new(None);
 }
@@ -164,6 +169,7 @@ pub struct PipeWireCapturable {
     physical_size_measured: bool,
 }
 
+
 impl PipeWireCapturable {
     fn new(
         conn: Arc<SyncConnection>,
@@ -261,6 +267,7 @@ fn get_res(capturable: PipeWireCapturable) -> Result<(usize, usize), Box<dyn Err
 }
 
 pub struct PipeWireRecorder {
+    linear_cpu: bool,
     buffer: Option<gst::MappedBuffer<gst::buffer::Readable>>,
     buffer_cropped: Vec<u8>,
     pix_fmt: String,
@@ -282,8 +289,24 @@ fn gst_element(name: &str) -> ResultType<gst::Element> {
     })
 }
 
+// 默认关闭：只有显式 RUSTDESK_WAYLAND_GL_BRIDGE=1 且三个 GL 元素都存在时才走新链，
+// 否则保持原链（原链行为不变）。
+const GL_BRIDGE_ENV: &str = "RUSTDESK_WAYLAND_GL_BRIDGE";
+const GL_BRIDGE_ELEMENTS: [&str; 3] = ["glupload", "glcolorconvert", "gldownload"];
+static LINEAR_CPU_MAP_REPORTED: AtomicBool = AtomicBool::new(false);
+
+fn gl_bridge_requested() -> bool {
+    matches!(std::env::var(GL_BRIDGE_ENV).as_deref(), Ok("1") | Ok("true"))
+        && GL_BRIDGE_ELEMENTS
+            .iter()
+            .all(|name| gst::ElementFactory::find(name).is_some())
+}
+
 impl PipeWireRecorder {
     pub fn new(capturable: PipeWireCapturable) -> ResultType<Self> {
+        if std::env::var("RUSTDESK_WAYLAND_LINEAR_CPU").as_deref() == Ok("1") {
+            return Self::new_linear(capturable);
+        }
         let pipeline = gst::Pipeline::new(None);
         // Clock waits on stale capture timestamps can exhaust the compositor's buffers.
         pipeline.use_clock(None::<&gst::Clock>);
@@ -310,7 +333,41 @@ impl PipeWireRecorder {
         sink.set_property("max-buffers", &1u32)?;
 
         pipeline.add_many(&[&src, &convert, &sink])?;
-        src.link(&convert)?;
+        if gl_bridge_requested() {
+            // 与已证成功的探针参数对齐（两处，均零新依赖）：
+            //  1) 在**协商合同**里要求线性：format=DMA_DRM + drm-format=XR24（不带 modifier = 线性）；
+            //  2) 在 glupload 之后显式要 GLMemory，排除 Dmabuf Passthrough（源对象直通）。
+            // 注：真实探针还有“显式 EGL display + GST_GL_PLATFORM=egl”两个条件，**不在本补丁内**。
+            src.set_property("always-copy", &false)?;
+            let filter = gst_element("capsfilter")?;
+            filter.set_property(
+                "caps",
+                &gst::Caps::builder("video/x-raw")
+                    .features(&["memory:DMABuf"])
+                    .field("format", &"DMA_DRM")
+                    .field("drm-format", &"XR24")
+                    .build(),
+            )?;
+            let upload = gst_element("glupload")?;
+            let glmem = gst_element("capsfilter")?;
+            glmem.set_property(
+                "caps",
+                &gst::Caps::builder("video/x-raw")
+                    .features(&["memory:GLMemory"])
+                    .build(),
+            )?;
+            let colorconvert = gst_element("glcolorconvert")?;
+            let download = gst_element("gldownload")?;
+            pipeline.add_many(&[&filter, &upload, &glmem, &colorconvert, &download])?;
+            src.link(&filter)?;
+            filter.link(&upload)?;
+            upload.link(&glmem)?;
+            glmem.link(&colorconvert)?;
+            colorconvert.link(&download)?;
+            download.link(&convert)?;
+        } else {
+            src.link(&convert)?;
+        }
         convert.link(&sink)?;
 
         let appsink = sink
@@ -362,6 +419,7 @@ impl PipeWireRecorder {
         }
 
         Ok(Self {
+            linear_cpu: false,
             pipeline,
             appsink,
             buffer: None,
@@ -375,8 +433,141 @@ impl PipeWireRecorder {
     }
 }
 
+impl PipeWireRecorder {
+    fn new_linear(capturable: PipeWireCapturable) -> ResultType<Self> {
+        let pipeline = gst::Pipeline::new(None);
+        pipeline.use_clock(None::<&gst::Clock>);
+        let src = gst_element("pipewiresrc")?;
+        src.set_property("fd", &capturable.fd.as_raw_fd())?;
+        src.set_property("path", &format!("{}", capturable.path))?;
+        src.set_property("keepalive_time", &1_000i32)?;
+        src.set_property("always-copy", &false)?;
+        let filter = gst_element("capsfilter")?;
+        filter.set_property(
+            "caps",
+            &gst::Caps::builder("video/x-raw")
+                .features(&["memory:DMABuf"])
+                .field("format", &"DMA_DRM")
+                .field("drm-format", &"XR24")
+                .build(),
+        )?;
+        let sink = gst_element("appsink")?;
+        sink.set_property("sync", &false)?;
+        sink.set_property("drop", &true)?;
+        sink.set_property("max-buffers", &1u32)?;
+        pipeline.add_many(&[&src, &filter, &sink])?;
+        src.link(&filter)?;
+        filter.link(&sink)?;
+        let appsink = sink
+            .dynamic_cast::<AppSink>()
+            .map_err(|_| GStreamerError("Sink element is expected to be an appsink!".into()))?;
+        pipeline.set_state(gst::State::Playing)?;
+        if is_server_running() {
+            let (result, state, pending) = pipeline.get_state(gst::ClockTime::from_mseconds(2000));
+            if result.is_err() || state != gst::State::Playing {
+                warn!(
+                    "Linear CPU pipeline state incomplete: {:?}, {:?}, {:?}",
+                    result, state, pending
+                );
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        Ok(Self {
+            linear_cpu: true,
+            pipeline,
+            appsink,
+            buffer: None,
+            pix_fmt: "BGRx".into(),
+            width: 0,
+            height: 0,
+            buffer_cropped: vec![],
+            is_cropped: false,
+            saved_raw_data: Vec::new(),
+        })
+    }
+
+    fn capture_linear(&mut self, timeout_ms: u64) -> Result<PixelProvider<'_>, Box<dyn Error>> {
+        let sample = match self
+            .appsink
+            .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
+        {
+            Some(sample) => sample,
+            None => return Ok(PixelProvider::NONE),
+        };
+        let caps = sample.get_caps().ok_or("Linear CPU sample has no caps")?;
+        if !caps.is_fixed()
+            || caps.get_size() != 1
+            || !caps.get_features(0).map_or(false, |f| {
+                !f.is_any() && f.get_size() == 1 && f.contains("memory:DMABuf")
+            })
+        {
+            return Err("Linear CPU requires fixed DMABuf caps".into());
+        }
+        let cap = caps
+            .get_structure(0)
+            .ok_or("Linear CPU caps have no structure")?;
+        if cap.get_name() != "video/x-raw"
+            || cap.get::<&str>("format")? != Some("DMA_DRM")
+            || cap.get::<&str>("drm-format")? != Some("XR24")
+        {
+            return Err("Linear CPU requires DMA_DRM/XR24 without a modifier".into());
+        }
+        let w: i32 = cap.get_value("width")?.get_some()?;
+        let h: i32 = cap.get_value("height")?.get_some()?;
+        if w <= 0 || h <= 0 {
+            return Err("Linear CPU requires positive dimensions".into());
+        }
+        let buf = sample.get_buffer().ok_or("Linear CPU sample has no buffer")?;
+        if buf.n_memory() != 1 || !buf.peek_memory(0).is_type("dmabuf") {
+            return Err("Linear CPU requires one dmabuf memory".into());
+        }
+        let meta = buf
+            .get_meta::<gstreamer_video::VideoMeta>()
+            .ok_or("Linear CPU requires VideoMeta")?;
+        if meta.get_format() != gstreamer_video::VideoFormat::Bgrx
+            || meta.get_n_planes() != 1
+            || meta.get_width() != w as u32
+            || meta.get_height() != h as u32
+        {
+            return Err("Linear CPU VideoMeta does not match XR24 caps".into());
+        }
+        let stride = meta.get_stride()[0];
+        if stride <= 0 {
+            return Err("Linear CPU requires a positive stride".into());
+        }
+        let offset = meta.get_offset()[0];
+        let crop = buf
+            .get_meta::<gstreamer_video::VideoCropMeta>()
+            .map(|m| m.get_rect());
+        let (width, height) = {
+            let result = linear_dmabuf::copy_visible(
+                buf, w as usize, h as usize, stride as usize, offset, crop,
+                &mut self.buffer_cropped,
+            );
+            if let Err(tag) = result {
+                if !LINEAR_CPU_MAP_REPORTED.swap(true, Ordering::Relaxed) {
+                    hbb_common::log::error!("linear-cpu-map-v2 error={}", tag);
+                }
+            }
+            result.map_err(|tag| GStreamerError(format!("linear-cpu-map-v2 error={}", tag)))?
+        };
+        let geometry_unchanged = self.width == width && self.height == height;
+        if crate::would_block_if_equal(&mut self.saved_raw_data, &self.buffer_cropped).is_err()
+            && geometry_unchanged
+        {
+            return Ok(PixelProvider::NONE);
+        }
+        self.width = width;
+        self.height = height;
+        Ok(PixelProvider::BGR0(width, height, &self.buffer_cropped))
+    }
+}
+
 impl Recorder for PipeWireRecorder {
     fn capture(&mut self, timeout_ms: u64) -> Result<PixelProvider<'_>, Box<dyn Error>> {
+        if self.linear_cpu {
+            return self.capture_linear(timeout_ms);
+        }
         if let Some(sample) = self
             .appsink
             .try_pull_sample(gst::ClockTime::from_mseconds(timeout_ms))
@@ -1162,6 +1353,16 @@ pub fn get_capturables() -> Result<Vec<PipeWireCapturable>, Box<dyn Error>> {
             return Err(Box::new(DBusError("RDP response is None.".into())));
         }
     };
+
+    // Reject multiple targets before constructing even the temporary resolution pipelines.
+    if config::c2_test_mode_active()
+        && config::Config::get_option("enable-keyboard") == "N"
+        && rdp_info.streams.len() != 1
+    {
+        return Err(Box::new(DBusError(
+            "C2 R2 view-only diagnosis requires exactly one selected stream".into(),
+        )));
+    }
 
     Ok(rdp_info
         .streams
