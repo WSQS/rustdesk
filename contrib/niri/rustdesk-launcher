@@ -1,0 +1,13 @@
+#!/bin/sh
+# Standard package entry, not a PATH shim for another command.
+# Do not silently convert a requested C2 test launch into real shared IPC mode.
+if [ "${RUSTDESK_C2_TEST_IPC_ROOT+x}" = x ]; then
+    printf '%s\n' 'Refusing normal package launch with a C2 test IPC environment.' >&2
+    exit 64
+fi
+ulimit -c 0 || exit 64
+ulimit -H -c 0 || exit 64
+umask 077
+export RUSTDESK_WAYLAND_LINEAR_CPU=1
+export RUST_LOG=info
+exec /usr/share/rustdesk/rustdesk "$@"

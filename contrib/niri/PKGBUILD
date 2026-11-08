@@ -1,0 +1,63 @@
+# PREBUILT-INPUT PACKAGER, NOT A CLEAN-CHECKOUT SOURCE BUILD.
+# Supply `rustdesk` and `libsciter-gtk.so` separately and verify the hashes
+# below. See contrib/niri/README.md for the source build inputs.
+# Local standard replacement package; packaging only, never build/install here.
+pkgname=rustdesk-niri
+pkgver=1.5.1
+pkgrel=1
+pkgdesc='RustDesk local niri linear DMA-BUF CPU readback build (non-Flutter)'
+arch=('x86_64')
+url='https://github.com/rustdesk/rustdesk'
+license=('AGPL3' 'custom:Sciter')
+provides=('rustdesk=1.5.1')
+conflicts=('rustdesk' 'rustdesk-bin' 'rustdesk-git')
+depends=(
+  'glibc' 'libgcc' 'libstdc++' 'gtk3' 'libx11' 'libxcb' 'libxfixes'
+  'libxtst' 'libxkbcommon' 'libpulse' 'dbus' 'libyuv' 'libvpx' 'aom' 'opus'
+  'gstreamer' 'gst-plugins-base' 'gst-plugins-base-libs' 'gst-plugin-pipewire'
+  'libayatana-appindicator' 'xdotool' 'sudo' 'systemd' 'pam' 'libva' 'libvdpau' 'util-linux-libs'
+)
+options=('!strip' '!debug')
+# Bounded package compression only; does not change any Rust build flags.
+COMPRESSZST=(zstd -c -T2 -6 -)
+source=(
+  'rustdesk'
+  'libsciter-gtk.so'
+  'rustdesk-launcher'
+  'rustdesk.service'
+  'rustdesk.desktop'
+  'rustdesk-link.desktop'
+  'rustdesk.png'
+  'rustdesk.svg'
+  'LICENSE.AGPL3'
+  'LICENSE.Sciter.html'
+  'NOTICE'
+)
+sha256sums=(
+  '429ff17683e619c55113d9267aa38072ee9ad8c1eaaf724a38861f42701966ed'
+  'a1682fbf55e004f1862d6ace31b5220121d20906bdbf308d0a9237b451e4db86'
+  '657997a414b6597f6aa215c2325625f9dc2f671b7f0a0b35a961d0994dc66898'
+  '331901c7302840617afa68467083bde5e7bcefe6f4382b63e3ec0bdca9642ef9'
+  '657d833090f8752cf0561b9dd272138020b57d4eadb25e4cc6a8e1587f8f9caf'
+  'ae15c66a6169d02fe358408712a0ac20249be262be812e89480a65636b4cb6b4'
+  'd1f9e63be757f345cfa3b3a0592ab02897935074e3876419f70fb554cef5872f'
+  'fd74e32e142f06cc3ac42ba8dba65b6c3a6c11ea690f70bcc80dd0e84838103a'
+  '8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef'
+  'a52733cc90fb112a730b67bbbe6fc1102fad644753af9bd584cab8ba0da3db49'
+  'f26da99e273b69923a1d7fce01ca8a0dde343dca33c47e26c21afe78acf23e81'
+)
+
+package() {
+  install -Dm755 "$srcdir/rustdesk" "$pkgdir/usr/share/rustdesk/rustdesk"
+  install -Dm644 "$srcdir/libsciter-gtk.so" "$pkgdir/usr/share/rustdesk/libsciter-gtk.so"
+  install -Dm755 "$srcdir/rustdesk-launcher" "$pkgdir/usr/bin/rustdesk"
+  install -Dm644 "$srcdir/rustdesk.service" "$pkgdir/usr/lib/systemd/system/rustdesk.service"
+  install -Dm644 "$srcdir/rustdesk.service" "$pkgdir/usr/share/rustdesk/files/systemd/rustdesk.service"
+  install -Dm644 "$srcdir/rustdesk.desktop" "$pkgdir/usr/share/applications/rustdesk.desktop"
+  install -Dm644 "$srcdir/rustdesk-link.desktop" "$pkgdir/usr/share/applications/rustdesk-link.desktop"
+  install -Dm644 "$srcdir/rustdesk.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/rustdesk.png"
+  install -Dm644 "$srcdir/rustdesk.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/rustdesk.svg"
+  install -Dm644 "$srcdir/LICENSE.AGPL3" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.AGPL3"
+  install -Dm644 "$srcdir/LICENSE.Sciter.html" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.Sciter.html"
+  install -Dm644 "$srcdir/NOTICE" "$pkgdir/usr/share/doc/$pkgname/NOTICE"
+}

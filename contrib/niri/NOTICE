@@ -1,0 +1,15 @@
+RustDesk niri non-Flutter source-oriented packaging notice
+
+This directory contains source-oriented build notes and packaging assets for
+the niri linear DMA-BUF CPU readback variant. It does not contain the RustDesk
+ELF, the Sciter runtime, a package archive, or a user profile.
+
+This application uses Sciter Engine (https://sciter.com/),
+copyright Terra Informatica Software, Inc.
+Sciter binary source: c-smile/sciter-sdk commit
+0298f1b34e9a0ff1dffb889d82c506a5da8bfb1e/bin.lnx/x64/libsciter-gtk.so
+Runtime SHA256: a1682fbf55e004f1862d6ace31b5220121d20906bdbf308d0a9237b451e4db86
+See LICENSE.Sciter.html in this directory.
+
+The package recipe does not enable, start, or disable a system service, and
+does not remove or migrate user configuration, password, or portal data.

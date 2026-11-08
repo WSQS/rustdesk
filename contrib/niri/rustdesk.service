@@ -1,0 +1,26 @@
+[Unit]
+Description=RustDesk
+Requires=network.target
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rustdesk --service
+# Standard systemd cgroup stop: no process-name pattern.
+# ctrlc 3.4.4 is built without its `termination` feature, so the service's
+# existing handler observes SIGINT only; SIGTERM would terminate it directly.
+# KillSignal=SIGINT uses that graceful loop; TimeoutStopSec then SIGKILLs
+# anything left in this unit's cgroup. Detached/sudo-PAM children may leave
+# the cgroup; that is verified after deployment approval, not assumed here.
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=30
+User=root
+LimitNOFILE=100000
+Environment="PULSE_LATENCY_MSEC=60" "PIPEWIRE_LATENCY=1024/48000"
+Environment="RUSTDESK_WAYLAND_LINEAR_CPU=1" "RUST_LOG=info"
+LimitCORE=0
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
