@@ -324,7 +324,10 @@ pub(super) fn remap_wayland_uinput_coord(x: i32, y: i32) -> (i32, i32) {
 // range and land offset, https://github.com/rustdesk/rustdesk/issues/15601
 #[cfg(target_os = "linux")]
 fn refresh_wayland_uinput_rect_if_changed() {
-    if is_x11() || !crate::input_service::wayland_use_uinput() {
+    if is_x11()
+        || !crate::input_service::wayland_use_uinput()
+        || crate::input_service::test_view_only_input_gate()
+    {
         return;
     }
     {

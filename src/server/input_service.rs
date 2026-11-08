@@ -2570,6 +2570,18 @@ pub fn wayland_use_uinput() -> bool {
     !crate::platform::is_x11() && crate::is_server()
 }
 
+/// C2 测试隔离：view-only 初始化闸门（仅测试模式且 `enable-keyboard=N` 时为真）。
+/// 只用于**初始化**阶段跳过 uinput 创建与显示位置填充；默认路径不变。
+#[inline]
+#[cfg(target_os = "linux")]
+pub fn test_view_only_input_gate() -> bool {
+    hbb_common::config::c2_test_mode_active()
+        && !hbb_common::config::option2bool(
+            "enable-keyboard",
+            &hbb_common::config::Config::get_option("enable-keyboard"),
+        )
+}
+
 #[inline]
 #[cfg(target_os = "linux")]
 pub fn wayland_use_rdp_input() -> bool {

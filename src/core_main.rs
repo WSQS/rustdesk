@@ -385,12 +385,30 @@ pub fn core_main() -> Option<CoreMainAction> {
             log::info!("start --server with user {}", crate::username());
             #[cfg(target_os = "linux")]
             {
-                hbb_common::allow_err!(crate::platform::check_autostart_config());
-                std::process::Command::new("pkill")
-                    .arg("-f")
-                    .arg(&format!("{} --tray", crate::get_app_name().to_lowercase()))
-                    .status()
-                    .ok();
+                // 测试隔离：三态判定，**先于**任何 cleanup/tray/start_server。
+                // Off   = 未设置环境变量 → 保留原有 cleanup 与托盘行为；
+                // Active= 合法隔离目录    → 旁路两处副作用（autostart 删除 / pkill --tray）；
+                // Invalid= 变量存在但非法 → 直接拒绝启动（不 cleanup、不 spawn tray、不 start_server）。
+                match hbb_common::config::c2_test_ipc() {
+                    hbb_common::config::C2TestIpc::Off => {
+                        hbb_common::allow_err!(crate::platform::check_autostart_config());
+                        std::process::Command::new("pkill")
+                            .arg("-f")
+                            .arg(&format!("{} --tray", crate::get_app_name().to_lowercase()))
+                            .status()
+                            .ok();
+                    }
+                    hbb_common::config::C2TestIpc::Active(_) => {}
+                    hbb_common::config::C2TestIpc::Invalid => {
+                        log::error!(
+                            "RUSTDESK_C2_TEST_IPC_ROOT is set but invalid; refusing to start --server"
+                        );
+                        eprintln!(
+                            "RUSTDESK_C2_TEST_IPC_ROOT is set but invalid; refusing to start"
+                        );
+                        return None;
+                    }
+                }
                 hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
             }
             #[cfg(windows)]

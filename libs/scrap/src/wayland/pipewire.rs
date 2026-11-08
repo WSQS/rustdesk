@@ -169,6 +169,12 @@ pub struct PipeWireCapturable {
     physical_size_measured: bool,
 }
 
+// Fixed lifecycle labels only: never log portal replies, credentials or sample contents.
+fn c2_stage(stage: &'static str) {
+    if config::c2_test_mode_active() {
+        hbb_common::log::info!("c2-r2-stage={}", stage);
+    }
+}
 
 impl PipeWireCapturable {
     fn new(
@@ -179,6 +185,7 @@ impl PipeWireCapturable {
     ) -> Self {
         // alternative to get screen resolution as stream.size is not always correct ex: on fractional scaling
         // https://github.com/rustdesk/rustdesk/issues/6116#issuecomment-1817724244
+        c2_stage("resolution.enter");
         let measured = get_res(Self {
             dbus_conn: conn.clone(),
             fd: fd.clone(),
@@ -190,6 +197,7 @@ impl PipeWireCapturable {
             physical_size: (0, 0),
             physical_size_measured: false,
         });
+        c2_stage("resolution.return");
         let physical_size_measured = measured.is_ok();
         let physical_size = measured.unwrap_or(stream.size);
         *resolution.lock().unwrap() = Some(physical_size);
@@ -245,10 +253,12 @@ impl Capturable for PipeWireCapturable {
 
 fn get_res(capturable: PipeWireCapturable) -> Result<(usize, usize), Box<dyn Error>> {
     let rec = PipeWireRecorder::new(capturable)?;
+    c2_stage("resolution.recorder.ready");
     if let Some(sample) = rec
         .appsink
         .try_pull_sample(gst::ClockTime::from_mseconds(300))
     {
+        c2_stage("resolution.sample.ready");
         let cap = sample
             .get_caps()
             .ok_or("Failed get caps")?
@@ -260,6 +270,7 @@ fn get_res(capturable: PipeWireCapturable) -> Result<(usize, usize), Box<dyn Err
         let h = h as usize;
         Ok((w, h))
     } else {
+        c2_stage("resolution.sample.absent");
         Err(Box::new(GStreamerError(
             "Error getting screen resolution".into(),
         )))
@@ -307,6 +318,7 @@ impl PipeWireRecorder {
         if std::env::var("RUSTDESK_WAYLAND_LINEAR_CPU").as_deref() == Ok("1") {
             return Self::new_linear(capturable);
         }
+        c2_stage("recorder.build.enter");
         let pipeline = gst::Pipeline::new(None);
         // Clock waits on stale capture timestamps can exhaust the compositor's buffers.
         pipeline.use_clock(None::<&gst::Clock>);
@@ -393,7 +405,9 @@ impl PipeWireRecorder {
             "[gstreamer] Setting pipeline {} to PLAYING state...",
             capturable.fd.as_raw_fd()
         );
+        c2_stage("recorder.play.enter");
         pipeline.set_state(gst::State::Playing)?;
+        c2_stage("recorder.play.return");
 
         // If `is_server_running()` is false, it means using remote_desktop_portal,
         // which does not use multiple streams, so no need to wait for state change.
@@ -401,6 +415,7 @@ impl PipeWireRecorder {
             // Wait for the state change to actually complete before proceeding.
             // The 2000ms timeout for pipeline state change was chosen based on empirical testing.
             let state_change = pipeline.get_state(gst::ClockTime::from_mseconds(2000));
+            c2_stage("recorder.play_state.return");
             match state_change {
                 (Ok(_), gst::State::Playing, _) => {
                     debug!(
@@ -418,6 +433,7 @@ impl PipeWireRecorder {
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
 
+        c2_stage("recorder.build.return");
         Ok(Self {
             linear_cpu: false,
             pipeline,
@@ -435,6 +451,7 @@ impl PipeWireRecorder {
 
 impl PipeWireRecorder {
     fn new_linear(capturable: PipeWireCapturable) -> ResultType<Self> {
+        c2_stage("recorder.build.enter");
         let pipeline = gst::Pipeline::new(None);
         pipeline.use_clock(None::<&gst::Clock>);
         let src = gst_element("pipewiresrc")?;
@@ -461,9 +478,12 @@ impl PipeWireRecorder {
         let appsink = sink
             .dynamic_cast::<AppSink>()
             .map_err(|_| GStreamerError("Sink element is expected to be an appsink!".into()))?;
+        c2_stage("recorder.play.enter");
         pipeline.set_state(gst::State::Playing)?;
+        c2_stage("recorder.play.return");
         if is_server_running() {
             let (result, state, pending) = pipeline.get_state(gst::ClockTime::from_mseconds(2000));
+            c2_stage("recorder.play_state.return");
             if result.is_err() || state != gst::State::Playing {
                 warn!(
                     "Linear CPU pipeline state incomplete: {:?}, {:?}, {:?}",
@@ -472,6 +492,7 @@ impl PipeWireRecorder {
             }
             std::thread::sleep(Duration::from_millis(150));
         }
+        c2_stage("recorder.build.return");
         Ok(Self {
             linear_cpu: true,
             pipeline,
@@ -667,11 +688,14 @@ impl Recorder for PipeWireRecorder {
 
 impl Drop for PipeWireRecorder {
     fn drop(&mut self) {
+        c2_stage("recorder.drop.enter");
         if let Err(err) = self.pipeline.set_state(gst::State::Null) {
             warn!("Failed to stop GStreamer pipeline: {}.", err);
         }
+        c2_stage("recorder.drop_null.return");
         // Wait for state change to complete to avoid races during PipeWire teardown.
         let _ = self.pipeline.get_state(gst::ClockTime::from_mseconds(2000));
+        c2_stage("recorder.drop_state.return");
     }
 }
 
@@ -968,12 +992,14 @@ pub fn request_remote_desktop(
     dbus::Path<'static>,
     bool,
 )> {
+    c2_stage("portal.request.enter");
     unsafe {
         if !INIT {
             gstreamer::init()?;
             INIT = true;
         }
     }
+    c2_stage("gst.init.return");
     let conn =
         SyncConnection::new_session().map_err(|e| anyhow!(dbus_stage_err("session-bus", &e)))?;
     let portal = get_portal(&conn);
@@ -1334,6 +1360,7 @@ pub fn get_capturables() -> Result<Vec<PipeWireCapturable>, Box<dyn Error>> {
 
     if rdp_connection.is_none() {
         let (conn, fd, streams, session, is_support_restore_token) = request_remote_desktop(false)?;
+        c2_stage("portal.remote.return");
         let conn = Arc::new(conn);
 
         let rdp_info = RdpSessionInfo {

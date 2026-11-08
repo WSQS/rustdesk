@@ -1,0 +1,147 @@
+diff --git a/src/config.rs b/src/config.rs
+index 9ee5cac..a45d02a 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -133,9 +133,142 @@ pub fn is_service_ipc_postfix(postfix: &str) -> bool {
+ 
+ // Keep Linux/macOS IPC parent directory rules in one place to avoid drift between
+ // `ipc_path()` and Unix `ipc_path_for_uid()`.
++/// 测试隔离：**唯一**的 IPC 根覆盖点。仅在 `RUSTDESK_C2_TEST_IPC_ROOT` 指向一个
++/// 由当前 euid 拥有、完整权限位恰为 0700、非符号链接的绝对目录时启用；
++/// 变量存在但任何一点不合法（含非 UTF-8）= `Invalid`，由调用方 fail closed，绝不回退真实路径。
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum C2TestIpc {
++    Off,
++    Active(std::path::PathBuf),
++    Invalid,
++}
++
++/// 纯函数：把"环境变量取值"+"目录元数据"折算成三态，便于单元测试与唯一判定源。
++/// meta = (is_dir, is_symlink, uid, mode, euid)
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub fn c2_test_ipc_classify(
++    raw: Result<String, std::env::VarError>,
++    meta: Option<(bool, bool, u32, u32, u32)>,
++) -> C2TestIpc {
++    let value = match raw {
++        Err(std::env::VarError::NotPresent) => return C2TestIpc::Off,
++        Err(_) => return C2TestIpc::Invalid,
++        Ok(v) => v,
++    };
++    if value.is_empty() {
++        return C2TestIpc::Invalid;
++    }
++    let path = std::path::PathBuf::from(&value);
++    if !path.is_absolute() {
++        return C2TestIpc::Invalid;
++    }
++    let Some((is_dir, is_symlink, uid, mode, euid)) = meta else {
++        return C2TestIpc::Invalid;
++    };
++    if !is_dir || is_symlink || euid == 0 || uid != euid || (mode & 0o7777) != 0o700 {
++        return C2TestIpc::Invalid;
++    }
++    C2TestIpc::Active(path)
++}
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub fn c2_test_ipc() -> &'static C2TestIpc {
++    static STATE: std::sync::OnceLock<C2TestIpc> = std::sync::OnceLock::new();
++    STATE.get_or_init(|| {
++        use std::os::unix::fs::MetadataExt;
++        let raw = std::env::var("RUSTDESK_C2_TEST_IPC_ROOT");
++        let meta = match &raw {
++            Ok(v) => {
++                use std::os::unix::fs::FileTypeExt;
++                match std::fs::symlink_metadata(v) {
++                    Ok(m) => {
++                        let ft = m.file_type();
++                        Some((ft.is_dir(), ft.is_symlink(), m.uid(), m.mode(), unsafe {
++                            libc::geteuid()
++                        }))
++                    }
++                    Err(_) => None,
++                }
++            }
++            Err(_) => None,
++        };
++        c2_test_ipc_classify(raw, meta)
++    })
++}
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub fn c2_test_mode_active() -> bool {
++    matches!(c2_test_ipc(), C2TestIpc::Active(_))
++}
++
++#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
++mod c2_test_ipc_tests {
++    use super::*;
++
++    const ME: u32 = 1000;
++
++    #[test]
++    fn absent_env_is_off() {
++        assert_eq!(c2_test_ipc_classify(Err(std::env::VarError::NotPresent), None), C2TestIpc::Off);
++    }
++
++    #[test]
++    fn non_unicode_env_is_invalid() {
++        let raw = Err(std::env::VarError::NotUnicode(std::ffi::OsString::from("x")));
++        assert_eq!(c2_test_ipc_classify(raw, None), C2TestIpc::Invalid);
++    }
++
++    #[test]
++    fn relative_or_empty_is_invalid() {
++        assert_eq!(c2_test_ipc_classify(Ok("".into()), None), C2TestIpc::Invalid);
++        assert_eq!(c2_test_ipc_classify(Ok("rel/dir".into()), None), C2TestIpc::Invalid);
++    }
++
++    #[test]
++    fn bad_meta_is_invalid() {
++        let p = Ok("/tmp/x".to_string());
++        // 符号链接
++        assert_eq!(c2_test_ipc_classify(p.clone(), Some((true, true, ME, 0o700, ME))), C2TestIpc::Invalid);
++        // 非目录
++        assert_eq!(c2_test_ipc_classify(p.clone(), Some((false, false, ME, 0o700, ME))), C2TestIpc::Invalid);
++        // 权限不是精确 0700（含特殊位）
++        assert_eq!(c2_test_ipc_classify(p.clone(), Some((true, false, ME, 0o750, ME))), C2TestIpc::Invalid);
++        assert_eq!(c2_test_ipc_classify(p.clone(), Some((true, false, ME, 0o1700, ME))), C2TestIpc::Invalid);
++        // uid 不符 / euid=0
++        assert_eq!(c2_test_ipc_classify(p.clone(), Some((true, false, ME + 1, 0o700, ME))), C2TestIpc::Invalid);
++        assert_eq!(c2_test_ipc_classify(p.clone(), Some((true, false, 0, 0o700, 0))), C2TestIpc::Invalid);
++        // 缺失
++        assert_eq!(c2_test_ipc_classify(p, None), C2TestIpc::Invalid);
++    }
++
++    #[test]
++    fn valid_dir_is_active() {
++        assert_eq!(
++            c2_test_ipc_classify(Ok("/tmp/x".into()), Some((true, false, ME, 0o700, ME))),
++            C2TestIpc::Active(std::path::PathBuf::from("/tmp/x"))
++        );
++    }
++}
++
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[inline]
+ fn ipc_parent_dir_for_uid(uid: u32, postfix: &str) -> String {
++    match c2_test_ipc() {
++        C2TestIpc::Off => {}
++        C2TestIpc::Invalid => {
++            // fail closed：env 存在但不可用时不回退真实路径
++            return "/nonexistent-rustdesk-c2-test-ipc/invalid".to_owned();
++        }
++        C2TestIpc::Active(root) => {
++            let euid = unsafe { libc::geteuid() };
++            if uid == euid && !is_service_ipc_postfix(postfix) {
++                return root.to_string_lossy().into_owned();
++            }
++            // 测试模式不得触达 service / 其它 uid 的 IPC
++            return "/nonexistent-rustdesk-c2-test-ipc/refused".to_owned();
++        }
++    }
+     let app_name = APP_NAME.read().unwrap().clone();
+     if is_service_ipc_postfix(postfix) {
+         format!("/tmp/{app_name}-service")

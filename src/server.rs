@@ -708,7 +708,7 @@ pub async fn start_server(is_server: bool, no_server: bool) {
         }
         input_service::fix_key_down_timeout_loop();
         #[cfg(target_os = "linux")]
-        if input_service::wayland_use_uinput() {
+        if input_service::wayland_use_uinput() && !input_service::test_view_only_input_gate() {
             allow_err!(input_service::setup_uinput(0, 1920, 0, 1080).await);
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]

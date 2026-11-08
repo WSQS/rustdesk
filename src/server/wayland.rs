@@ -436,7 +436,9 @@ pub(super) async fn check_init() -> ResultType<()> {
             .map_err(|err| anyhow::anyhow!("Wayland display state task failed: {err}"))?,
         };
         if empty {
-            if crate::input_service::wayland_use_uinput() {
+            if crate::input_service::wayland_use_uinput()
+                && !crate::input_service::test_view_only_input_gate()
+            {
                 // The cached layout may predate compositor changes made while no session
                 // was active, https://github.com/rustdesk/rustdesk/issues/15601
                 // Read before the rect: an apply that races a layout move is recorded under the
@@ -545,7 +547,11 @@ fn init_displays() -> ResultType<()> {
 
         let mut all = Display::all()?;
         log::debug!("Initializing displays with fill_displays()");
-        {
+        if input_service::test_view_only_input_gate() {
+            // C2 测试隔离：view-only 初始化不构造鼠标校准句柄、也不调用 fill_displays
+            //（fill_displays 在多个同尺寸 capturable 时可能经 cursor 校准新建 portal Session）。
+            log::info!("c2 test mode: skipping fill_displays (view-only init gate)");
+        } else {
             let temp_mouse_move_handle = input_service::TemporaryMouseMoveHandle::new();
             let move_mouse_to = |x, y| temp_mouse_move_handle.move_mouse_to(x, y);
             fill_displays(move_mouse_to, crate::get_cursor_pos, &mut all)
